@@ -1,0 +1,37 @@
+name: build-and-replay
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (built-in .NET Framework csc, no SDK)
+        shell: cmd
+        run: build.cmd
+
+      - name: Replay regression gates
+        shell: cmd
+        run: bin\Replay.exe --script data\scripted-2026-11-16 --thumbs data\thumbs-2026-11-16 --model model\model.txt --assert
+
+      - name: Cross-validation report
+        shell: cmd
+        run: bin\Replay.exe --script data\scripted-2026-11-16 --thumbs data\thumbs-2026-11-16 --cv
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory release/PalmGuard -Force | Out-Null
+          Copy-Item bin/*.exe release/PalmGuard/
+          Copy-Item model release/PalmGuard/model -Recurse
+          Copy-Item README.md, LICENSE release/PalmGuard/
+          Compress-Archive release/PalmGuard release/PalmGuard-win-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PalmGuard-win-x64
+          path: release/PalmGuard-win-x64.zip
