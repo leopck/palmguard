@@ -38,6 +38,8 @@ macOS solves this in software, judging each touch from its shape, its motion and
 - ⚡ **Zero added latency for normal pointing.** A touch is only held (≤ 100 ms) when it's ambiguous: at the edge, right after typing, or next to a palm.
 - 👍 **Thumb-aware.** A resting or clicking thumb is wide, not tall, and stays allowed while your index finger points.
 - 🤏 **No phantom zoom or scroll.** Scroll and zoom gestures pause while a palm is down, without changing your saved settings.
+- 🧭 **Mac-style scrolling (opt-in).** Two-finger scrolling locks to the axis you start on, so a vertical scroll no longer drifts the page sideways. A clear sideways move breaks the lock. Flicks keep gliding with momentum, and a new touch catches the page.
+- 👆 **Two-finger press = right click.** Press the pad with two fingers down, even mid-scroll, and you get a right click. A resting thumb doesn't count, so thumb + finger clicks stay left clicks.
 - 🖱 **Click repair.** Accidental thumb taps no longer trigger Windows' *tap-and-drag* (which leaves the left button stuck down), and physical presses that Windows drops are recovered.
 - 🧠 **Self-learning, safely.** It learns from **Ctrl+Alt+Z** ("a palm got through"), **Ctrl+Alt+X** ("my finger was ignored") and automatic hindsight labels. A new model is only adopted if it doesn't ignore more fingers.
 - 📏 **Self-calibrating.** Contact sizes are normalised to *your* finger on *your* touchpad.
@@ -122,6 +124,11 @@ Settings live in `%LOCALAPPDATA%\PalmGuard\settings.ini`. All of them can be tog
 | `ClickRecovery` | 1 | re-send physical clicks that Windows dropped |
 | `GestureHold` | 1 | pause scroll/zoom while a palm is down |
 | `RecordSessions` | 1 | keep local recordings for tuning/replay |
+| `MacScroll` | 0 | PalmGuard does two-finger scrolling itself (axis lock + momentum); Windows' own pan gesture is switched off while it runs |
+| `Momentum` | 1 | keep scrolling after a flick (with `MacScroll`) |
+| `ScrollSpeed` | 100 | scroll speed in percent (with `MacScroll`) |
+| `ScrollReverse` | 0 | flip the direction relative to Windows' "scrolling direction" setting |
+| `TwoFingerClick` | 1 | physical press with two fingers down = right click |
 | `MaxSessions` / `MaxSessionMB` | 20 / 300 | recording retention |
 
 ## Results

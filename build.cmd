@@ -13,8 +13,8 @@ if not exist bin mkdir bin
 set REFS=-r:System.Windows.Forms.dll -r:System.Drawing.dll
 set OPTS=-nologo -optimize+ -platform:x64
 
-"%CSC%" %OPTS% -target:winexe %REFS% -win32icon:assets\palmguard.ico -resource:assets\palmguard.ico,PalmGuard.ico -out:bin\PalmGuard.exe src\PalmGuard.cs src\Engine.cs || exit /b 1
-"%CSC%" %OPTS% -target:exe           -out:bin\Replay.exe tools\Replay.cs src\Engine.cs || exit /b 1
+"%CSC%" %OPTS% -target:winexe %REFS% -win32icon:assets\palmguard.ico -resource:assets\palmguard.ico,PalmGuard.ico -out:bin\PalmGuard.exe src\PalmGuard.cs src\Engine.cs src\Gestures.cs || exit /b 1
+"%CSC%" %OPTS% -target:exe           -out:bin\Replay.exe tools\Replay.cs src\Engine.cs src\Gestures.cs || exit /b 1
 "%CSC%" %OPTS% -target:exe    %REFS% -out:bin\TouchLogger.exe tools\TouchLogger.cs || exit /b 1
 "%CSC%" %OPTS% -target:exe    %REFS% -out:bin\ForceProbe.exe tools\ForceProbe.cs || exit /b 1
 "%CSC%" %OPTS% -target:exe           -out:bin\TouchpadParams.exe tools\TouchpadParams.cs || exit /b 1

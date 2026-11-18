@@ -38,9 +38,9 @@ static class Replay
     static List<Row> LoadRows(string dir)
     {
         var rows = new List<Row>();
-        foreach (var line in File.ReadLines(Path.Combine(dir, "touch.csv")).Skip(1))
+        foreach (var line in ReadShared(Path.Combine(dir, "touch.csv")).Skip(1))
         {
-            var p = line.Split(',');
+            var p = line.Split(','); if (p.Length < 16 || p[15].Length == 0) continue; // live file: last line may be partial
             rows.Add(new Row
             {
                 t = double.Parse(p[0], CultureInfo.InvariantCulture), phase = p[1], scan = int.Parse(p[2]), id = int.Parse(p[5]), tip = int.Parse(p[6]), conf = int.Parse(p[7]),
@@ -49,20 +49,27 @@ static class Replay
         }
         return rows;
     }
+    static IEnumerable<string> ReadShared(string path)
+    {
+        using (var r = new StreamReader(new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)))
+        { string l; while ((l = r.ReadLine()) != null) yield return l; }
+    }
     static List<double> LoadKeys(string dir)
     {
         var k = new List<double>(); var f = Path.Combine(dir, "keys.csv"); if (!File.Exists(f)) return k;
-        foreach (var line in File.ReadLines(f).Skip(1)) k.Add(double.Parse(line.Split(',')[0], CultureInfo.InvariantCulture));
+        foreach (var line in ReadShared(f).Skip(1)) k.Add(double.Parse(line.Split(',')[0], CultureInfo.InvariantCulture));
         return k;
     }
 
-    class Result { public List<Contact> contacts = new List<Contact>(); public List<FrameRec> frames = new List<FrameRec>(); public Engine eng; }
+    class Result { public List<Contact> contacts = new List<Contact>(); public List<FrameRec> frames = new List<FrameRec>(); public Engine eng; public GStats gs = new GStats(); }
+    class GStats { public int presses, right, gestures, vert, horiz, free, pinch, ignored, breaks, momentum; public long wy, wx, wyMom, wxMom; public List<string> rightAt = new List<string>(); }
 
     static Result Run(List<Row> rows, List<double> keys, Model m, bool learn)
     {
         var e = new Engine(); e.model = m; e.learn = learn; if (!uncalibrated) e.calib.AssumeReference();
         var res = new Result { eng = e };
         var known = new HashSet<Contact>();
+        var g = new Gestures(); var gs = res.gs; bool prevBtn = false; var lastMode = Gestures.Mode.Idle; double lastTick = 0;
         int ki = 0, i = 0, lcx = rows.Count > 0 ? rows[0].cx : 0, lcy = rows.Count > 0 ? rows[0].cy : 0;
         while (i < rows.Count)
         {
@@ -76,6 +83,26 @@ static class Replay
             double t = rows[i].t;
             while (ki < keys.Count && keys[ki] <= t) e.OnKey(keys[ki++]);
             e.OnFrame(t, frame, btn);
+            // gestures: momentum ticks at ~120 Hz between frames, then the frame itself
+            for (double tt = lastTick + 0.008; tt < t; tt += 0.008) { int my, mx; g.Tick(tt, out my, out mx); gs.wyMom += Math.Abs(my); gs.wxMom += Math.Abs(mx); if (g.momentumActive || my != 0) lastTick = tt; }
+            lastTick = Math.Max(lastTick, t - 0.008);
+            bool wasMom = g.momentumActive;
+            int wy, wx; g.Frame(t, e, out wy, out wx); gs.wy += Math.Abs(wy); gs.wx += Math.Abs(wx);
+            if (g.momentumActive && !wasMom) gs.momentum++;
+            if (g.mode != lastMode)
+            {
+                if (lastMode == Gestures.Mode.Deciding)
+                {
+                    if (gdebug && g.mode == Gestures.Mode.Scroll) Console.WriteLine("    scroll t={0:F2} axis={1} {2}", t, g.axis, Desc(e));
+                    if (g.mode == Gestures.Mode.Scroll) { gs.gestures++; if (g.axis == Gestures.Axis.Vertical) gs.vert++; else if (g.axis == Gestures.Axis.Horizontal) gs.horiz++; else gs.free++; }
+                    else if (g.mode == Gestures.Mode.Pinch) gs.pinch++; else if (g.mode == Gestures.Mode.Ignore) gs.ignored++;
+                }
+                lastMode = g.mode;
+            }
+            if (btn && !prevBtn) { gs.presses++; if (gdebug) Console.WriteLine("    press t={0:F2} right={1} {2}", t, g.IsTwoFingerPress(e), Desc(e));
+                if (g.IsTwoFingerPress(e)) { gs.right++; gs.rightAt.Add(t.ToString("F2")); } }
+            if (gdebug && g.lockBreaks != gs.breaks) Console.WriteLine("    lock-break t={0:F2} -> {1}", t, g.axis);
+            prevBtn = btn; gs.breaks = g.lockBreaks;
             var fr = new FrameRec(); string why;
             fr.block = e.ShouldBlock(out why);
             foreach (var c in e.Active.Values) { fr.act.Add(c); if (known.Add(c)) res.contacts.Add(c); }
@@ -86,7 +113,11 @@ static class Replay
         return res;
     }
 
-    static bool uncalibrated = false;
+    static bool uncalibrated = false, gdebug = false;
+    static string Desc(Engine e)
+    {
+        return string.Join(" | ", e.Active.Values.Select(c => string.Format("{0} ({1:F0},{2:F0})mm W{3}H{4} max W{5}H{6} age{7:F2} net{8:F1}", c.cls, c.Last.x, c.Last.y, c.Last.w, c.Last.h, c.maxW, c.maxH, c.Last.t - c.t0, c.Net)).ToArray());
+    }
     class Score { public int palmLeaks, fingerBlocked, fingerN, slowFingers; public double fingerLostFrac; }
     static Score Report(string title, Result r, Func<Contact, Geom, bool?> lab)
     {
@@ -139,8 +170,10 @@ static class Replay
             else if (args[a] == "--train") train = args[++a];
             else if (args[a] == "--cv") cv = true;
             else if (args[a] == "--assert") assert = true;
+            else if (args[a] == "--gdebug") gdebug = true;
             else if (args[a] == "--uncalibrated") uncalibrated = true;
             else if (args[a] == "--script") sets.Add(new DS { name = "scripted recording", dir = args[++a], lab = (c, g) => ScriptPalm(c, g) });
+            else if (args[a] == "--session") { var dd = args[++a]; sets.Add(new DS { name = "session " + Path.GetFileName(dd.TrimEnd('/', '\\')), dir = dd, lab = (c, g) => null }); }
             else if (args[a] == "--thumbs") sets.Add(new DS { name = "thumb-click session", dir = args[++a], lab = ThumbLabel });
         }
         foreach (var d in sets) { d.rows = LoadRows(d.dir); d.keys = LoadKeys(d.dir); }
@@ -150,6 +183,12 @@ static class Replay
         {
             var r0 = Run(d.rows, d.keys, m, false);
             var sc = Report(d.name + " / model v" + m.version + (m.version == 0 ? " (hand prior)" : ""), r0, d.lab);
+            var G = r0.gs;
+            Console.WriteLine("  gestures: {0} scrolls (vertical {1}, horizontal {2}, free {3}), {4} pinch, {5} one-finger-moving; lock breaks {6}; momentum flicks {7}",
+                G.gestures, G.vert, G.horiz, G.free, G.pinch, G.ignored, G.breaks, G.momentum);
+            Console.WriteLine("  wheel units: vertical {0} (+{1} momentum), horizontal {2} (+{3} momentum)", G.wy, G.wyMom, G.wx, G.wxMom);
+            Console.WriteLine("  physical presses: {0}, two-finger (right click): {1}{2}", G.presses, G.right, G.right > 0 ? " at t=" + string.Join(" ", G.rightAt) : "");
+            if (d.lab == ThumbLabel && G.right > 0) failures.Add(d.name + ": " + G.right + " thumb click(s) became right clicks");
             Samples(r0, d.lab, samples, grp, ref gi);
             // regression gates
             if (sc.palmLeaks > 0) failures.Add(d.name + ": " + sc.palmLeaks + " palm contact(s) leaked");

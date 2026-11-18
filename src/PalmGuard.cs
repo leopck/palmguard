@@ -31,8 +31,8 @@ using PG;
 [assembly: AssemblyTitle("PalmGuard")]
 [assembly: AssemblyProduct("PalmGuard")]
 [assembly: AssemblyDescription("Palm rejection for Windows Precision Touchpads")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 // ======================================================================================
 // Settings
@@ -40,7 +40,8 @@ using PG;
 public class Settings
 {
     public bool Enabled = true, Learning = true, ThumbTapIgnore = true, ClickRecovery = true, GestureHold = true, RecordSessions = true;
-    public int MaxSessions = 20, MaxSessionMB = 300;
+    public bool MacScroll = false, Momentum = true, ScrollReverse = false, TwoFingerClick = true;
+    public int MaxSessions = 20, MaxSessionMB = 300, ScrollSpeed = 100;
     string path;
 
     public static Settings Load(string path)
@@ -61,6 +62,11 @@ public class Settings
                         case "ClickRecovery": s.ClickRecovery = b; break;
                         case "GestureHold": s.GestureHold = b; break;
                         case "RecordSessions": s.RecordSessions = b; break;
+                        case "MacScroll": s.MacScroll = b; break;
+                        case "Momentum": s.Momentum = b; break;
+                        case "ScrollReverse": s.ScrollReverse = b; break;
+                        case "TwoFingerClick": s.TwoFingerClick = b; break;
+                        case "ScrollSpeed": if (n >= 20 && n <= 500) s.ScrollSpeed = n; break;
                         case "MaxSessions": if (n > 0) s.MaxSessions = n; break;
                         case "MaxSessionMB": if (n > 0) s.MaxSessionMB = n; break;
                     }
@@ -77,6 +83,8 @@ public class Settings
                 "# PalmGuard settings (1 = on, 0 = off)",
                 "Enabled=" + (Enabled ? 1 : 0), "Learning=" + (Learning ? 1 : 0), "ThumbTapIgnore=" + (ThumbTapIgnore ? 1 : 0),
                 "ClickRecovery=" + (ClickRecovery ? 1 : 0), "GestureHold=" + (GestureHold ? 1 : 0), "RecordSessions=" + (RecordSessions ? 1 : 0),
+                "MacScroll=" + (MacScroll ? 1 : 0), "Momentum=" + (Momentum ? 1 : 0), "ScrollReverse=" + (ScrollReverse ? 1 : 0), "ScrollSpeed=" + ScrollSpeed,
+                "TwoFingerClick=" + (TwoFingerClick ? 1 : 0),
                 "MaxSessions=" + MaxSessions, "MaxSessionMB=" + MaxSessionMB });
         }
         catch { }
@@ -94,6 +102,8 @@ static class W32
     [StructLayout(LayoutKind.Explicit)] public struct INPUT { [FieldOffset(0)] public uint type; [FieldOffset(8)] public MOUSEINPUT mi; }
     public delegate IntPtr HookProc(int code, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll", SetLastError = true)] public static extern bool RegisterRawInputDevices(RAWINPUTDEVICE[] d, uint n, uint sz);
+    [StructLayout(LayoutKind.Sequential)] public struct RAWINPUTDEVICELIST { public IntPtr hDevice; public uint dwType; }
+    [DllImport("user32.dll", SetLastError = true)] public static extern uint GetRawInputDeviceList([Out] RAWINPUTDEVICELIST[] list, ref uint n, uint sz);
     [DllImport("user32.dll")] public static extern uint GetRawInputData(IntPtr h, uint cmd, IntPtr data, ref uint size, uint hdr);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetRawInputDeviceInfoW")] public static extern uint GetRawInputDeviceInfo(IntPtr h, uint c, IntPtr d, ref uint sz);
     [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SetWindowsHookEx(int id, HookProc fn, IntPtr mod, uint tid);
@@ -104,6 +114,8 @@ static class W32
     [DllImport("user32.dll", SetLastError = true)] public static extern bool SystemParametersInfo(uint a, uint b, byte[] c, uint d);
     [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr GetModuleHandle(string n);
+    [DllImport("winmm.dll")] public static extern uint timeBeginPeriod(uint ms);
+    [DllImport("winmm.dll")] public static extern uint timeEndPeriod(uint ms);
     [DllImport("hid.dll")] public static extern int HidP_GetUsageValue(int type, ushort page, ushort link, ushort usage, out uint val, IntPtr pp, byte[] rpt, uint len);
     [DllImport("hid.dll")] public static extern int HidP_GetUsages(int type, ushort page, ushort link, [Out] ushort[] list, ref uint len, IntPtr pp, byte[] rpt, uint len2);
     [DllImport("hid.dll")] public static extern int HidP_GetValueCaps(int type, byte[] caps, ref ushort len, IntPtr pp);
@@ -115,13 +127,14 @@ static class W32
 // ======================================================================================
 static class Core
 {
-    public const string VERSION = "1.0.0";
+    public const string VERSION = "1.1.0";
     public const double HOLD_AFTER = 0.05, GESTURE_HOLD = 0.15;
     const double THUMB_TAP_MAX = 0.20, TAP_CLICK_WINDOW = 0.35, RECOVER_AFTER = 0.06;
     static readonly IntPtr INJECT_TAG = (IntPtr)0x50474D, PROBE_TAG = (IntPtr)0x504750; // "PGM", "PGP"
 
     public static readonly object Sync = new object();
     public static Engine eng = new Engine();
+    public static Gestures gest = new Gestures();
     public static Learner learner;
     public static Model seedModel;
     public static Settings settings;
@@ -147,7 +160,10 @@ static class Core
     public static int blockedEvents, gestureOffCount, thumbTapsIgnored, clicksRecovered, hookReinstalls, errors;
 
     // click repair
-    static bool rawButton, swallowTapUp, pendingPress, injectedDown;
+    static bool rawButton, swallowTapUp, pendingPress, rightFromTwo;
+    static uint injectedUp;                 // 0, or the button-up flag owed for a button we injected
+    static bool injectedDown { get { return injectedUp != 0; } }
+    public static int twoFingerClicks;
     static double lastThumbTapT = -9, padDownT = -9, lastPassedDownT = -9;
 
     // hook
@@ -208,6 +224,7 @@ static class Core
         StartSession();
         Log("start", "v" + VERSION + " model v" + eng.model.version + " seed=" + learner.seed.Count + " live=" + learner.live.Count + " calibrated=" + eng.calib.calibrated);
         InitGestures();
+        StartMomentumThread();
     }
 
     static void StartSession()
@@ -239,7 +256,8 @@ static class Core
     public static void Shutdown()
     {
         if (Interlocked.Exchange(ref shutdownOnce, 1) == 1) return;
-        try { if (injectedDown) { SendMouse(0x0004); injectedDown = false; } } catch { }
+        try { ReleaseInjected(); } catch { }
+        try { if (rightFromTwo) { SendMouse(0x0010); rightFromTwo = false; } } catch { }
         try { if (hook != IntPtr.Zero) W32.UnhookWindowsHookEx(hook); hook = IntPtr.Zero; } catch { }
         RestoreGestures();
         if (replay) return;
@@ -250,7 +268,9 @@ static class Core
 
     // ---------------------------------------------------------------- gestures (SPI, non-persistent)
     static volatile bool wantGesturesOff; static bool gesturesOff; static AutoResetEvent spiEvt = new AutoResetEvent(false);
-    static bool origPan = true, origZoom = true; public static double lastSpiMs; static bool spiStarted;
+    static bool origPan = true, origZoom = true, scrollRev; public static double lastSpiMs; static bool spiStarted; static volatile bool spiDirty;
+    static bool OwnScroll { get { return settings.Enabled && settings.MacScroll && padDetected; } }
+    static bool PanWanted { get { return origPan && !OwnScroll; } }
     public static bool GesturesHeld { get { return wantGesturesOff; } }
     static byte[] GetTP() { var b = new byte[48]; BitConverter.GetBytes(1u).CopyTo(b, 0); return W32.SystemParametersInfo(0xAE, 48, b, 0) ? b : null; }
     static void SetPanZoom(bool pan, bool zoom)
@@ -268,6 +288,7 @@ static class Core
                 if (k != null) { origPan = Convert.ToInt32(k.GetValue("PanEnabled", 1)) != 0; origZoom = Convert.ToInt32(k.GetValue("ZoomEnabled", 1)) != 0; }
         }
         catch { }
+        try { var b = GetTP(); if (b != null) scrollRev = (BitConverter.ToUInt32(b, 16) & (1u << 9)) != 0; } catch { }
         SetPanZoom(origPan, origZoom); // repair state left by a crash
         spiStarted = true;
         new Thread(() =>
@@ -277,18 +298,32 @@ static class Core
                 spiEvt.WaitOne();
                 try
                 {
-                    while (wantGesturesOff != gesturesOff)
+                    while (wantGesturesOff != gesturesOff || spiDirty)
                     {
-                        bool off = wantGesturesOff; var t0 = Stopwatch.StartNew();
-                        if (off) SetPanZoom(false, false); else SetPanZoom(origPan, origZoom);
+                        bool off = wantGesturesOff; spiDirty = false; var t0 = Stopwatch.StartNew();
+                        if (off) SetPanZoom(false, false); else SetPanZoom(PanWanted, origZoom);
                         gesturesOff = off; lastSpiMs = t0.Elapsed.TotalMilliseconds; if (off) gestureOffCount++;
                     }
                 }
                 catch (Exception e) { Error("spi", e); }
             }
         }) { IsBackground = true, Name = "PalmGuard.SPI" }.Start();
+        ApplyScrollSettings();
     }
     public static void RestoreGestures() { wantGesturesOff = false; if (spiStarted) { try { SetPanZoom(origPan, origZoom); } catch { } gesturesOff = false; } }
+    static Gestures NewGestures() { var g = new Gestures(); ConfigureGestures(g); return g; }
+    static void ConfigureGestures(Gestures g)
+    {
+        g.Natural = !scrollRev ^ settings.ScrollReverse; // follow Windows' scroll-direction setting
+        g.Momentum = settings.Momentum; g.GainPerMm = 14 * settings.ScrollSpeed / 100.0;
+    }
+    // call after changing MacScroll/Enabled/ScrollReverse/Momentum/ScrollSpeed
+    public static void ApplyScrollSettings()
+    {
+        lock (Sync) { ConfigureGestures(gest); if (!OwnScroll) gest.StopMomentum(); }
+        spiDirty = true; if (spiStarted) spiEvt.Set();
+        Log("scroll-settings", "own=" + OwnScroll + " natural=" + gest.Natural + " speed=" + settings.ScrollSpeed);
+    }
     static void UpdateGestureWish(double t)
     {
         bool off = settings.Enabled && settings.GestureHold && t < gestureUntil;
@@ -302,11 +337,44 @@ static class Core
             new W32.RAWINPUTDEVICE { Page = 0x0D, Usage = 0x05, Flags = 0x100 | 0x2000, Target = hwnd },   // touchpad, INPUTSINK|DEVNOTIFY
             new W32.RAWINPUTDEVICE { Page = 0x01, Usage = 0x06, Flags = 0x100, Target = hwnd } };           // keyboard
         if (!W32.RegisterRawInputDevices(devs, 2, (uint)Marshal.SizeOf(typeof(W32.RAWINPUTDEVICE)))) Log("error", "RegisterRawInputDevices " + Marshal.GetLastWin32Error());
+        // find the touchpad now rather than at the first touch (scroll takeover needs it before the first gesture)
+        try
+        {
+            uint n = 0, sz = (uint)Marshal.SizeOf(typeof(W32.RAWINPUTDEVICELIST));
+            W32.GetRawInputDeviceList(null, ref n, sz);
+            var list = new W32.RAWINPUTDEVICELIST[n];
+            if (n > 0 && W32.GetRawInputDeviceList(list, ref n, sz) != uint.MaxValue)
+                lock (Sync)
+                {
+                    enumerating = true;
+                    foreach (var d in list) if (d.dwType == 2 && padPP == IntPtr.Zero && IsPtpCollection(d.hDevice)) CheckPad(d.hDevice);
+                    enumerating = false;
+                }
+        }
+        catch (Exception e) { Error("enumerate", e); }
     }
 
+    // enumerating: picked at startup without input (tentative; a real touch from another PTP replaces it).
+    // Virtual touchpads (remote-desktop/streaming drivers, "VHF") are never picked by enumeration.
+    static bool enumerating, padTentative;
+    static bool IsPtpCollection(IntPtr dev)
+    {   // RID_DEVICE_INFO: only the Digitizer/Touch Pad (0x0D/0x05) collection, not touchscreens or pens
+        var buf = Marshal.AllocHGlobal(64);
+        try
+        {
+            Marshal.WriteInt32(buf, 32); uint sz = 32;
+            if (W32.GetRawInputDeviceInfo(dev, 0x2000000b, buf, ref sz) == uint.MaxValue) return false;
+            return (ushort)Marshal.ReadInt16(buf, 20) == 0x0D && (ushort)Marshal.ReadInt16(buf, 22) == 0x05;
+        }
+        finally { Marshal.FreeHGlobal(buf); }
+    }
     static bool CheckPad(IntPtr dev)
     {
-        bool r; if (isPad.TryGetValue(dev, out r)) return r;
+        bool r; if (isPad.TryGetValue(dev, out r)) { if (r && dev == padHandle && !enumerating) padTentative = false; return r; }
+        if (padTentative && !enumerating && dev != padHandle)
+        {   // input arrived from a different device than the one guessed at startup: re-evaluate from scratch
+            Marshal.FreeHGlobal(padPP); padPP = IntPtr.Zero; padHandle = IntPtr.Zero; isPad.Clear(); padTentative = false;
+        }
         uint sz = 0; W32.GetRawInputDeviceInfo(dev, 0x20000007, IntPtr.Zero, ref sz);
         IntPtr nb = Marshal.AllocHGlobal((int)sz * 2 + 2); W32.GetRawInputDeviceInfo(dev, 0x20000007, nb, ref sz);
         string name = Marshal.PtrToStringUni(nb) ?? ""; Marshal.FreeHGlobal(nb);
@@ -328,14 +396,15 @@ static class Core
                     if (usage == 0x30) { maxX = lmax; physX = mm; } else { maxY = lmax; physY = mm; }
                 }
             }
-        r = lk.Count > 0 && maxX > 0 && maxY > 0 && padPP == IntPtr.Zero;
+        r = lk.Count > 0 && maxX > 0 && maxY > 0 && padPP == IntPtr.Zero && !(enumerating && name.IndexOf("VHF", StringComparison.OrdinalIgnoreCase) >= 0);
         if (r)
         {
-            padPP = pp; padHandle = dev; links = lk; padName = name; padDetected = true;
+            padPP = pp; padHandle = dev; links = lk; padName = name; padDetected = true; padTentative = enumerating;
             eng.geom.maxX = maxX; eng.geom.maxY = maxY;
             if (physX > 20 && physY > 20 && physX < 400 && physY < 400) { eng.geom.mmX = physX / maxX; eng.geom.mmY = physY / maxY; }
             else { eng.geom.mmX = eng.geom.mmY = 105.0 / maxX; } // no usable physical size: assume ~105 mm wide
             if (!eng.calib.calibrated && name.IndexOf("BLTP784", StringComparison.OrdinalIgnoreCase) >= 0) eng.calib.AssumeReference();
+            spiDirty = true; if (spiStarted) spiEvt.Set();
             Log("device", name + " " + maxX + "x" + maxY + " " + eng.geom.Wmm.ToString("F1") + "x" + eng.geom.Hmm.ToString("F1") + "mm slots=" + lk.Count + " calibrated=" + eng.calib.calibrated);
         }
         else Marshal.FreeHGlobal(pp);
@@ -353,9 +422,12 @@ static class Core
         {
             padHandle = IntPtr.Zero; padPP = IntPtr.Zero; links = new List<ushort>(); isPad.Clear(); padDetected = false;
             eng.Active.Clear(); blocking = false; blockUntil = -1; gestureUntil = -1; rawButton = false; pendingPress = false;
-            if (injectedDown) { SendMouse(0x0004); injectedDown = false; }
+            ReleaseInjected();
+            if (rightFromTwo) { SendMouse(0x0010); rightFromTwo = false; }
+            gest.StopMomentum(); gest = NewGestures();
             lDownSwallowed = rDownSwallowed = swallowTapUp = false;
         }
+        spiDirty = true; if (spiStarted) spiEvt.Set(); // pan back on until the pad is found again
         Log("reset-device", why);
     }
 
@@ -379,7 +451,7 @@ static class Core
                 if (type == 1)
                 {
                     ushort flags = (ushort)Marshal.ReadInt16(buf, (int)hdr + 2), vk = (ushort)Marshal.ReadInt16(buf, (int)hdr + 6);
-                    if ((flags & 1) == 0 && !IsModifier(vk)) { eng.OnKey(t); sessKeys.WriteLine("{0:F4},live,0", t); }
+                    if ((flags & 1) == 0 && !IsModifier(vk)) { eng.OnKey(t); sessKeys.WriteLine("{0:F4},live,0", t); gest.StopMomentum(); }
                     return;
                 }
                 if (type != 2 || !CheckPad(dev) || padPP == IntPtr.Zero) return;
@@ -440,9 +512,23 @@ static class Core
             if (pendingPress && t - padDownT >= RECOVER_AFTER)
             {
                 pendingPress = false;
-                if (lastPassedDownT < padDownT - 0.03) { SendMouse(0x0002); injectedDown = true; clicksRecovered++; Log("click-recovered", "down"); }
+                if (lastPassedDownT < padDownT - 0.03)
+                {
+                    bool right = settings.TwoFingerClick && gest.IsTwoFingerPress(eng);
+                    SendMouse(right ? 0x0008u : 0x0002u); injectedUp = right ? 0x0010u : 0x0004u; clicksRecovered++; Log("click-recovered", right ? "right down" : "down");
+                }
             }
-            if (releaseEdge) { pendingPress = false; if (injectedDown) { SendMouse(0x0004); injectedDown = false; Log("click-recovered", "up"); } }
+            if (releaseEdge) { pendingPress = false; if (injectedDown) { ReleaseInjected(); Log("click-recovered", "up"); } }
+            if (pressEdge) gest.StopMomentum();
+            // Mac-style scrolling: two fingers -> wheel events with axis lock (Windows pan is switched off)
+            if (OwnScroll)
+            {
+                bool wasMomentum = gest.momentumActive;
+                int wy, wx; gest.Frame(t, eng, out wy, out wx);
+                SendWheel(wy, wx);
+                if (gest.mode == Gestures.Mode.Scroll) gestureUntil = Math.Max(gestureUntil, t + GESTURE_HOLD); // no accidental zoom mid-scroll
+                if (gest.momentumActive && !wasMomentum) momentumEvt.Set();
+            }
         }
         string reason; bool want = eng.ShouldBlock(out reason);
         if (want) { blockUntil = t + HOLD_AFTER; gestureUntil = t + GESTURE_HOLD; lastReason = reason; }
@@ -548,6 +634,7 @@ static class Core
     {
         settings.Enabled = on; settings.Save();
         if (!on) { blocking = false; UpdateGestureWish(Now()); }
+        ApplyScrollSettings();
         Log(on ? "enabled" : "disabled", ""); Notify(on ? "PalmGuard resumed" : "PalmGuard paused - stock touchpad behaviour");
     }
 
@@ -559,6 +646,41 @@ static class Core
         Interlocked.Exchange(ref lastHookTicks, Stopwatch.GetTimestamp());
         if (hook == IntPtr.Zero) Log("error", "SetWindowsHookEx " + Marshal.GetLastWin32Error());
     }
+    static void ReleaseInjected() { if (injectedUp != 0) { SendMouse(injectedUp); injectedUp = 0; } }
+    static void SendWheel(int wy, int wx)
+    {
+        if (wy == 0 && wx == 0) return;
+        var a = new List<W32.INPUT>();
+        if (wy != 0) a.Add(new W32.INPUT { type = 0, mi = new W32.MOUSEINPUT { dwFlags = 0x0800, mouseData = unchecked((uint)wy), dwExtraInfo = INJECT_TAG } });
+        if (wx != 0) a.Add(new W32.INPUT { type = 0, mi = new W32.MOUSEINPUT { dwFlags = 0x01000, mouseData = unchecked((uint)wx), dwExtraInfo = INJECT_TAG } });
+        W32.SendInput((uint)a.Count, a.ToArray(), Marshal.SizeOf(typeof(W32.INPUT)));
+    }
+    static AutoResetEvent momentumEvt = new AutoResetEvent(false);
+    public static void StartMomentumThread()
+    {
+        new Thread(() =>
+        {
+            while (true)
+            {
+                momentumEvt.WaitOne();
+                W32.timeBeginPeriod(1);
+                try
+                {
+                    while (true)
+                    {
+                        int wy, wx; bool more;
+                        lock (Sync) { gest.Tick(Now(), out wy, out wx); more = gest.momentumActive && OwnScroll; if (!more) gest.StopMomentum(); }
+                        SendWheel(wy, wx);
+                        if (!more) break;
+                        Thread.Sleep(8);
+                    }
+                }
+                catch (Exception e) { Error("momentum", e); }
+                finally { W32.timeEndPeriod(1); }
+            }
+        }) { IsBackground = true, Name = "PalmGuard.Momentum", Priority = ThreadPriority.AboveNormal }.Start();
+    }
+    static bool TwoFingerNow() { lock (Sync) return settings.TwoFingerClick && gest.IsTwoFingerPress(eng); }
     static void SendMouse(uint flags)
     {
         var a = new[] { new W32.INPUT { type = 0, mi = new W32.MOUSEINPUT { dwFlags = flags, dwExtraInfo = INJECT_TAG } } };
@@ -590,11 +712,17 @@ static class Core
                 bool injected = (info.flags & 1) != 0; int msg = wParam.ToInt32(); bool swallow = false;
                 switch (msg)
                 {
-                    case 0x0200: swallow = blocking && !injected; break;
+                    case 0x0200: swallow = !injected && (blocking || (settings.MacScroll && Now() < gest.scrollUntil)); break; // no cursor drift while scrolling
                     case 0x020A: case 0x020E: swallow = blocking && info.extra != INJECT_TAG; break;
                     case 0x0201:
                         if (!injected && settings.ThumbTapIgnore && !rawButton && Now() - lastThumbTapT < TAP_CLICK_WINDOW)
                         { swallow = true; swallowTapUp = true; thumbTapsIgnored++; Log("thumb-tap-ignored", ""); break; }
+                        if (!injected) gest.StopMomentum();
+                        if (!injected && TwoFingerNow())
+                        {   // two fingers down + physical press = right click (Mac-style), even mid-scroll
+                            swallow = true; rightFromTwo = true; SendMouse(0x0008); twoFingerClicks++; gest.rightClicks++;
+                            lastPassedDownT = Now(); pendingPress = false; Log("two-finger-click", ""); break;
+                        }
                         swallow = blocking && !injected && !ClickReleases(); lDownSwallowed = swallow;
                         if (!swallow && !injected) { lastPassedDownT = Now(); pendingPress = false; }
                         break;
@@ -603,6 +731,7 @@ static class Core
                         if (!swallow && !injected) { lastPassedDownT = Now(); pendingPress = false; }
                         break;
                     case 0x0202:
+                        if (!injected && rightFromTwo) { swallow = true; rightFromTwo = false; SendMouse(0x0010); break; }
                         if (!injected && swallowTapUp) { swallow = true; swallowTapUp = false; break; }
                         swallow = lDownSwallowed && !injected; if (!injected) lDownSwallowed = false; break;
                     case 0x0205: swallow = rDownSwallowed && !injected; if (!injected) rDownSwallowed = false; break;
@@ -857,7 +986,9 @@ class Dashboard : Form
         Line(g, x, ref y, "updates", s.accepted + " accepted · " + s.rejected + " rejected");
         Line(g, x, ref y, "finger size", s.calibrated ? s.fingerW.ToString("F1") + " × " + s.fingerH.ToString("F1") : "calibrating…");
         Line(g, x, ref y, "gestures", Core.gestureOffCount + " holds  (" + Core.lastSpiMs.ToString("F0") + " ms)");
-        Line(g, x, ref y, "clicks", Core.thumbTapsIgnored + " taps ignored · " + Core.clicksRecovered + " recovered");
+        Line(g, x, ref y, "clicks", Core.thumbTapsIgnored + " taps ignored · " + Core.clicksRecovered + " recovered · " + Core.twoFingerClicks + " right");
+        var gs = Core.gest;
+        Line(g, x, ref y, "scrolling", !Core.settings.MacScroll ? "Windows" : gs.momentumActive ? "momentum" : gs.mode == Gestures.Mode.Scroll ? "lock: " + gs.axis.ToString().ToLower() : gs.mode == Gestures.Mode.Pinch ? "pinch (Windows)" : "Mac-style · " + gs.lockBreaks + " lock breaks");
         y += 4; Sec(g, x, ref y, "ON THE PAD NOW");
         if (s.contacts.Count == 0) { g.DrawString("nothing", fMed, new SolidBrush(DIM), x, y); y += 20; }
         foreach (var c in s.contacts)
@@ -966,6 +1097,12 @@ class TrayApp : ApplicationContext
         miThumb = Opt(opts, "Ignore thumb-zone taps", () => Core.settings.ThumbTapIgnore, v => { Core.settings.ThumbTapIgnore = v; Core.settings.Save(); });
         miRecover = Opt(opts, "Recover clicks Windows drops", () => Core.settings.ClickRecovery, v => { Core.settings.ClickRecovery = v; Core.settings.Save(); });
         miGesture = Opt(opts, "Hold scroll/zoom while a palm is down", () => Core.settings.GestureHold, v => { Core.settings.GestureHold = v; Core.settings.Save(); });
+        opts.DropDownItems.Add(new ToolStripSeparator());
+        Opt(opts, "Mac-style scrolling (axis lock + momentum)", () => Core.settings.MacScroll, v => { Core.settings.MacScroll = v; Core.settings.Save(); Core.ApplyScrollSettings(); });
+        Opt(opts, "Scroll momentum", () => Core.settings.Momentum, v => { Core.settings.Momentum = v; Core.settings.Save(); Core.ApplyScrollSettings(); });
+        Opt(opts, "Reverse scroll direction", () => Core.settings.ScrollReverse, v => { Core.settings.ScrollReverse = v; Core.settings.Save(); Core.ApplyScrollSettings(); });
+        Opt(opts, "Two-finger press = right click", () => Core.settings.TwoFingerClick, v => { Core.settings.TwoFingerClick = v; Core.settings.Save(); });
+        opts.DropDownItems.Add(new ToolStripSeparator());
         miRecord = Opt(opts, "Record sessions for tuning (restart to apply)", () => Core.settings.RecordSessions, v => { Core.settings.RecordSessions = v; Core.settings.Save(); });
         menu.Items.Add(opts);
         miStartup = new ToolStripMenuItem("Start with Windows", null, (s, e) => SetStartup(!miStartup.Checked));
@@ -977,7 +1114,7 @@ class TrayApp : ApplicationContext
         {
             miPause.Text = (Core.settings.Enabled ? "Pause" : "Resume") + " palm rejection   Ctrl+Alt+P";
             miStartup.Checked = IsStartup();
-            foreach (ToolStripMenuItem it in opts.DropDownItems) ((Func<bool>)it.Tag)();
+            foreach (var it in opts.DropDownItems.OfType<ToolStripMenuItem>()) ((Func<bool>)it.Tag)();
         };
 
         tray = new NotifyIcon { Icon = AppIcon.Get(false), Text = "PalmGuard", Visible = true, ContextMenuStrip = menu };

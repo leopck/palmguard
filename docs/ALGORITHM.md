@@ -98,7 +98,27 @@ The labels feed a class-balanced logistic regression trained with Adam and L2-re
 * **Thumb-zone taps are ignored.** A resting thumb that lifts for about 30 ms looks like a tap to Windows. Windows' "tap twice and drag" then holds the left button down until the thumb lifts, and swallows every physical press in between.
 * **Recovery.** If the touchpad reports a physical press and Windows delivers no button-down within 60 ms, PalmGuard injects one, then releases it when the touchpad does.
 
-## 7. Evaluation
+## 7. Gestures ([`src/Gestures.cs`](../src/Gestures.cs))
+
+**Which contacts count.** Only trusted, non-palm contacts that are not a resting thumb. A resting thumb is wide and short, or a wider-than-finger contact parked in the thumb zone that hasn't moved.
+
+**Two-finger scrolling** (`MacScroll=1`). PalmGuard switches Windows' pan gesture off through the same non-persistent SPI call and sends its own wheel events (`MOUSEEVENTF_WHEEL` / `HWHEEL`, sub-notch deltas).
+
+| Step | Rule |
+|---|---|
+| Decide | Wait for 1.5 mm of centroid travel. The distance between the fingers changing faster than the centroid moves means pinch (left to Windows zoom). One finger moving while the other rests means not a scroll. Both fingers must travel together. |
+| Lock | Starting direction ≥ 1.8 : 1 locks to that axis; otherwise free. |
+| Break | Cross-axis motion > 4 mm over a ~120 ms window and 1.5× the on-axis motion switches the axis. A second break within 0.5 s means the fingers are wandering, so the scroll goes free. |
+| Gain | 14 wheel units per mm, up to 2.5× for fast swipes (`ScrollSpeed` scales it). |
+| Momentum | On lift faster than 60 mm/s, velocity decays as `exp(-t / 0.45 s)` at ~120 Hz. A new touch, key or click stops it. |
+
+While a scroll is active, touchpad cursor motion is suppressed and zoom is held, as for palms.
+
+**Two-finger press** (`TwoFingerClick=1`). When Windows reports a left button-down from a physical press and exactly two counting contacts are down within 45 mm, the button-down is swallowed and a right button-down is injected (and the matching up). Click recovery injects a right click in the same situation.
+
+On the recorded sessions (about 800 physical presses), every press made with a resting thumb plus a finger stays a left click. The right clicks are all two fingertips side by side.
+
+## 8. Evaluation
 
 `bin\Replay.exe` replays recorded sessions through the exact same engine.
 
@@ -113,7 +133,7 @@ The labels feed a class-balanced logistic regression trained with Adam and L2-re
 
 These numbers come from one laptop and one person's hands, about 3 minutes of labelled data. Treat them as a regression baseline, not a general accuracy claim.
 
-## 8. References
+## 9. References
 
 * J. Schwarz, R. Xiao, J. Mankoff, S. Hudson, C. Harrison. *Probabilistic Palm Rejection Using Spatiotemporal Touch Features and Iterative Classification.* CHI 2014. <https://www.robertxiao.ca/research/palm-rejection/>
 * Chromium OS gestures, `palm_classifying_filter_interpreter.cc`. <https://chromium.googlesource.com/chromiumos/platform/gestures/>
