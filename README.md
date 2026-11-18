@@ -38,7 +38,7 @@ macOS solves this in software, judging each touch from its shape, its motion and
 - ⚡ **Zero added latency for normal pointing.** A touch is only held (≤ 100 ms) when it's ambiguous: at the edge, right after typing, or next to a palm.
 - 👍 **Thumb-aware.** A resting or clicking thumb is wide, not tall, and stays allowed while your index finger points.
 - 🤏 **No phantom zoom or scroll.** Scroll and zoom gestures pause while a palm is down, without changing your saved settings.
-- 🧭 **Mac-style scrolling (opt-in).** Two-finger scrolling locks to the axis you start on, so a vertical scroll no longer drifts the page sideways. A clear sideways move breaks the lock. Flicks keep gliding with momentum, and a new touch catches the page.
+- 🧭 **Mac-style scrolling (opt-in).** Two-finger scrolling locks to the axis you start on, so a vertical scroll no longer drifts the page sideways. A clear sideways move breaks the lock. Flicks keep gliding with momentum, and a new touch catches the page. See the [note on browsers](#is-it-production-ready).
 - 👆 **Two-finger press = right click.** Press the pad with two fingers down, even mid-scroll, and you get a right click. A resting thumb doesn't count, so thumb + finger clicks stay left clicks.
 - 🖱 **Click repair.** Accidental thumb taps no longer trigger Windows' *tap-and-drag* (which leaves the left button stuck down), and physical presses that Windows drops are recovered.
 - 🧠 **Self-learning, safely.** It learns from **Ctrl+Alt+Z** ("a palm got through"), **Ctrl+Alt+X** ("my finger was ignored") and automatic hindsight labels. A new model is only adopted if it doesn't ignore more fingers.
@@ -56,6 +56,12 @@ macOS solves this in software, judging each touch from its shape, its motion and
 | ![palm plus finger](docs/img/palm-plus-finger.png) | ![heat map](docs/img/heatmap.png) |
 
 Red/yellow heat shows where palms land; cyan shows where fingers work. The ring around each touch is its palm probability.
+
+### Mac-style scrolling
+
+<img src="docs/img/scroll-lock.png" width="760" alt="Two fingers scrolling with the scroll locked to the vertical axis">
+
+The finger trails drift sideways, but the scroll stays locked to vertical, so the page doesn't slide left and right. Turn it on from the tray menu: **Options → Mac-style scrolling**.
 
 ## How it works
 
@@ -153,6 +159,7 @@ These numbers are from replaying recorded sessions through the shipping engine (
 - On other touchpads it starts in a cautious **uncalibrated** mode, with size rules off: 19/22 palms caught in replay. It calibrates after about 8 deliberate finger strokes.
 - Touchpads that don't report contact **width/height** (optional in the PTP spec) get reduced accuracy.
 - It's a user-mode app. Very occasionally the first ~7 ms frame of a palm can reach Windows before the decision. A kernel filter driver that clears the PTP confidence bit would remove that and is the logical next step.
+- **Mac-style scrolling sends mouse-wheel events.** Windows doesn't let apps send "precise touchpad" scrolls. Chromium browsers (Edge, Chrome) animate every wheel event, so on some pages scrolling can trail behind your fingers. Turning off `edge://flags/#smooth-scrolling` (or `chrome://flags/#smooth-scrolling`) helps. That's why the feature is off by default. A kernel filter that edits the touch data before Windows reads it would keep native scrolling and is planned.
 - Physical click force/hysteresis is hardware. On the reference touchpad, a resting thumb can keep the mechanical button held, and no software can change that.
 
 **Recordings from other laptops are the most valuable contribution.** See below.

@@ -530,6 +530,7 @@ static class Core
                 if (gest.momentumActive && !wasMomentum) momentumEvt.Set();
             }
         }
+        else if (settings.MacScroll) { int ry, rx; gest.Frame(t, eng, out ry, out rx); } // replay: drive the dashboard only, never inject
         string reason; bool want = eng.ShouldBlock(out reason);
         if (want) { blockUntil = t + HOLD_AFTER; gestureUntil = t + GESTURE_HOLD; lastReason = reason; }
         bool nb = settings.Enabled && (want || t < blockUntil);
@@ -751,6 +752,7 @@ static class Core
         public bool blocking, gesturesHeld, enabled, training, calibrated, padDetected;
         public string reason; public int modelVersion, labels, strong, accepted, rejected, palms, fwPalms, released;
         public double fingerW, fingerH, wmm, hmm, edgeMm; public double[] weights;
+        public string scrollAxis; public float scrollX, scrollY; // set while a two-finger scroll is active
     }
     public static Snap TakeSnapshot()
     {
@@ -771,6 +773,11 @@ static class Core
             s.labels = learner.live.Count; s.strong = learner.StrongCount; s.accepted = learner.accepted; s.rejected = learner.rejected; s.training = learner.training;
             s.palms = eng.palmsModel + eng.palmsHard; s.fwPalms = eng.palmsFw; s.released = eng.released + eng.thumbClicks;
             s.fingerW = eng.calib.fingerW; s.fingerH = eng.calib.fingerH; s.calibrated = eng.calib.calibrated;
+            if (settings.MacScroll && gest.mode == Gestures.Mode.Scroll)
+            {
+                var fs = eng.Active.Values.Where(c => c.cls == Cls.Finger && c.hist.Count > 0).ToList();
+                if (fs.Count > 0) { s.scrollAxis = gest.axis.ToString().ToLower(); s.scrollX = (float)fs.Average(c => c.Last.x); s.scrollY = (float)fs.Average(c => c.Last.y); }
+            }
             s.wmm = eng.geom.Wmm; s.hmm = eng.geom.Hmm; s.edgeMm = eng.cfg.EdgeScaleMm; s.padDetected = padDetected;
         }
         return s;
@@ -950,6 +957,21 @@ class Dashboard : Form
                 using (var lp = Round(new RectangleF(lx - 6, ly - 2, lw + 12, 34), 8)) g.FillPath(new SolidBrush(Color.FromArgb(210, BG)), lp);
                 g.DrawString(lab, fSmall, new SolidBrush(col), lx, ly); g.DrawString(lab2, fSmall, new SolidBrush(DIM), lx, ly + 15);
             }
+            if (s.scrollAxis != null)
+            {   // scroll axis lock: rail through the finger centroid
+                float sx = pad.X + s.scrollX * pxPerMm, sy = pad.Y + s.scrollY * pxPerMm;
+                using (var rail = new Pen(Color.FromArgb(200, CYAN), 3f) { CustomStartCap = new AdjustableArrowCap(5, 5), CustomEndCap = new AdjustableArrowCap(5, 5) })
+                {
+                    if (s.scrollAxis == "vertical") g.DrawLine(rail, sx, sy - 70, sx, sy + 70);
+                    else if (s.scrollAxis == "horizontal") g.DrawLine(rail, sx - 90, sy, sx + 90, sy);
+                    else { rail.Color = Color.FromArgb(120, CYAN); g.DrawLine(rail, sx, sy - 60, sx, sy + 60); g.DrawLine(rail, sx - 60, sy, sx + 60, sy); }
+                }
+                string txt = s.scrollAxis == "free" ? "scroll: free" : "scroll locked: " + s.scrollAxis;
+                var ts = g.MeasureString(txt, fMed);
+                float tx = Math.Min(Math.Max(sx - ts.Width / 2, pad.X + 10), pad.Right - ts.Width - 10), ty = Math.Max(pad.Y + 8, sy - 112);
+                using (var lp = Round(new RectangleF(tx - 8, ty - 3, ts.Width + 16, ts.Height + 6), 9)) { g.FillPath(new SolidBrush(Color.FromArgb(225, BG)), lp); g.DrawPath(new Pen(CYAN, 1.5f), lp); }
+                g.DrawString(txt, fMed, new SolidBrush(CYAN), tx, ty);
+            }
             g.Clip = oldClip;
             g.DrawPath(new Pen(s.blocking ? RED : GRID, s.blocking ? 2.5f : 1.5f), path);
         }
@@ -986,7 +1008,7 @@ class Dashboard : Form
         Line(g, x, ref y, "updates", s.accepted + " accepted · " + s.rejected + " rejected");
         Line(g, x, ref y, "finger size", s.calibrated ? s.fingerW.ToString("F1") + " × " + s.fingerH.ToString("F1") : "calibrating…");
         Line(g, x, ref y, "gestures", Core.gestureOffCount + " holds  (" + Core.lastSpiMs.ToString("F0") + " ms)");
-        Line(g, x, ref y, "clicks", Core.thumbTapsIgnored + " taps ignored · " + Core.clicksRecovered + " recovered · " + Core.twoFingerClicks + " right");
+        Line(g, x, ref y, "clicks", Core.thumbTapsIgnored + " taps · " + Core.clicksRecovered + " recovered · " + Core.twoFingerClicks + " right");
         var gs = Core.gest;
         Line(g, x, ref y, "scrolling", !Core.settings.MacScroll ? "Windows" : gs.momentumActive ? "momentum" : gs.mode == Gestures.Mode.Scroll ? "lock: " + gs.axis.ToString().ToLower() : gs.mode == Gestures.Mode.Pinch ? "pinch (Windows)" : "Mac-style · " + gs.lockBreaks + " lock breaks");
         y += 4; Sec(g, x, ref y, "ON THE PAD NOW");
@@ -1246,6 +1268,7 @@ static class Replay
             else if (args[a] == "--from") from = double.Parse(args[++a], CultureInfo.InvariantCulture);
         }
         Core.Init(Path.Combine(Path.GetTempPath(), "palmguard-replay"), true);
+        Core.settings.MacScroll = true; // show the scroll classifier in the dashboard
 
         var rows = new List<string[]>();
         foreach (var line in File.ReadLines(Path.Combine(dir, "touch.csv")).Skip(1)) { var p = line.Split(','); if (p.Length >= 16) rows.Add(p); }
